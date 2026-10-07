@@ -439,7 +439,7 @@ def outline_sections(doc) -> list[dict]:
         if page < 1:
             continue
         title = clean_title(title)
-        m = re.match(r"^(\d{2})\b", title)
+        m = re.match(r"^(\d{2})(?:\d{2})?\b", title)  # "11 Engine", "11 31 005 ...", ETM "1230 Charge"
         toc.append({"title": title, "page": page, "level": min(level, 3),
                     "group": m.group(1) if m and m.group(1) in MAIN_GROUPS else None})
     return toc
