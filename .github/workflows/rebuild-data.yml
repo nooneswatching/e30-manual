@@ -1,0 +1,72 @@
+# Rebuilds site/data (OCR text, page images, search corpus, parts index) and commits it.
+# Vercel deploys the repository as a static site, so the committed data is what gets served.
+#
+# Runs when you press "Run workflow", or when manual settings, parts data or the tools change.
+# PDFs come from the GitHub Release tagged "manuals" (attach new scans there, then run this).
+# OCR results are cached between runs, so only new pages are processed.
+name: Rebuild manual data
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "manuals/**"
+      - "parts/**"
+      - "tools/**"
+      - ".github/workflows/rebuild-data.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch manuals from the "manuals" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view manuals >/dev/null 2>&1; then
+            gh release download manuals --dir manuals --pattern '*.pdf' --pattern '*.json' --clobber
+          fi
+          ls -la manuals
+
+      - name: Restore OCR cache
+        uses: actions/cache@v4
+        with:
+          path: build/cache
+          key: ocr-cache-${{ hashFiles('manuals/*.pdf', 'tools/build_manuals.py') }}
+          restore-keys: |
+            ocr-cache-
+
+      - name: Install tesseract
+        run: sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr tesseract-ocr-eng
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build
+        run: python tools/build.py --workers 4 --clean
+
+      - name: Commit generated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A site/data
+          if git diff --cached --quiet; then
+            echo "No changes to site/data"
+          else
+            git commit -m "Rebuild manual data"
+            git push
+          fi
