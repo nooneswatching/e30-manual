@@ -42,7 +42,34 @@ DEFAULTS = {
 }
 
 # "11 31 005 Removing and installing camshaft"
-REPAIR_CODE_RE = re.compile(r"^\s*(\d{2})\s?(\d{2})\s?(\d{3})\s+([A-Za-z(][^\n]{2,90})$")
+REPAIR_CODE_RE = re.compile(r"^\s*(\d{2})[\s:.]?(\d{2})[\s:.]?(\d{3})\b[\s|:.-]*([A-Za-z(][^\n]{2,90})?$")
+CAPS_LINE_RE = re.compile(r"^[A-Z][A-Z0-9 ,/&\-()'.]{3,70}$")
+ACRONYMS = {"BMW", "ABS", "DME", "EGR", "SRS", "ASC", "LSD", "ZF", "AC", "A/C", "DIN", "TDC", "ECU", "EML", "SI", "OBC",
+            "M10", "M20", "M21", "M30", "M42", "S14", "LH", "RH", "II", "III", "IV", "ASU", "US", "USA", "ETM", "CD", "LSB"}
+
+
+def nice_case(title: str) -> str:
+    """ALL-CAPS OCR headings -> sentence case, keeping acronyms and model codes."""
+    if not title.isupper():
+        return title
+    words = title.split()
+    out = []
+    for i, w in enumerate(words):
+        core = w.strip("(),.:;")
+        if core in ACRONYMS or any(ch.isdigit() for ch in core) or (len(core) <= 2 and core.isalpha() and i == 0):
+            out.append(w)
+        else:
+            out.append(w.capitalize() if i == 0 else w.lower())
+    return " ".join(out)
+
+
+def plausible_title(title: str) -> bool:
+    if not title or not title[0].isalpha():
+        return False
+    letters = sum(c.isalpha() for c in title)
+    if letters < 4 or letters / max(len(title), 1) < 0.55:
+        return False
+    return not any(ch in title for ch in "=|_~{}[]<>")
 # "Section 11 - Engine", "GROUP 34 BRAKES"
 SECTION_RE = re.compile(r"^\s*(?:section|group|chapter)\s+(\d{1,3})\s*[-:.–]?\s*([A-Za-z][^\n]{2,80})$", re.I)
 # An all-caps heading line near the top of a page
@@ -303,6 +330,12 @@ def detect_sections(pages: list[dict]) -> list[dict]:
         lines = [ln.strip() for ln in (rec.get("text") or "").split("\n") if ln.strip()]
         page_lines[rec["n"]] = lines
         g, label = page_header(lines)
+        if not g:
+            for ln in lines[:6]:
+                m = REPAIR_CODE_RE.match(ln)
+                if m and m.group(1) in MAIN_GROUPS:
+                    g = m.group(1)
+                    break
         raw_groups[rec["n"]] = g
         rec["label"] = label
         rec["group"] = g
@@ -341,21 +374,31 @@ def detect_sections(pages: list[dict]) -> list[dict]:
                 variant = f"{vm.group(1).strip().title()} {vm.group(2)}{vm.group(3)}" if vm else re.sub(r"\s+", " ", ln).strip()
                 break
         got = False
-        for ln in lines[:12]:
+        for li, ln in enumerate(lines[:12]):
             m = REPAIR_CODE_RE.match(ln)
             if m:
                 gg, ss, nnn, title = m.groups()
-                title = clean_title(title)
-                if sum(c.isalpha() for c in title) < 4:
+                title = clean_title(title or "")
+                # Headings wrap: absorb following all-caps lines ("REMOVING AND INSTALLING" / "OIL PAN").
+                for nxt in lines[li + 1:li + 3]:
+                    if CAPS_LINE_RE.match(nxt) and not REPAIR_CODE_RE.match(nxt) and not PAGE_HEADER_RE.match(nxt) \
+                            and (title.isupper() or not title):
+                        title = clean_title(f"{title} {nxt}".strip())
+                    else:
+                        break
+                title = nice_case(title)
+                if g and gg != g:
+                    gg = g  # OCR misread the group digits; trust the page's running header
+                if not plausible_title(title) or gg not in MAIN_GROUPS:
                     continue
-                found.append({"title": f"{gg} {ss} {nnn} {title}", "page": n, "group": gg if gg in MAIN_GROUPS else g, "level": 2})
+                found.append({"title": f"{gg} {ss} {nnn} {title}", "page": n, "group": gg, "level": 2})
                 got = True
                 continue
             m = SUBSECTION_RE.match(ln)
             if m and not got:
                 gg, ss, dots, title = m.groups()
                 title = clean_title(title)
-                if (dots or gg == g) and gg in MAIN_GROUPS and sum(c.isalpha() for c in title) >= 4:
+                if (dots or gg == g) and gg in MAIN_GROUPS and plausible_title(title):
                     t = f"{gg} {ss} {title}"
                     if variant:
                         t += f" ({variant})"
@@ -366,15 +409,16 @@ def detect_sections(pages: list[dict]) -> list[dict]:
             if m and not got:
                 num, title = m.groups()
                 code = num.zfill(2)[:2]
-                found.append({"title": f"{num} {clean_title(title)}", "page": n, "group": code if code in MAIN_GROUPS else g, "level": 2})
-                got = True
+                if plausible_title(clean_title(title)):
+                    found.append({"title": f"{num} {nice_case(clean_title(title))}", "page": n, "group": code if code in MAIN_GROUPS else g, "level": 2})
+                    got = True
         if not got:
             for ln in lines[:4]:
                 cand = clean_title(ln)
                 if PAGE_HEADER_RE.match(cand) or VARIANT_RE.match(cand):
                     continue
-                if CAPS_RE.match(cand) and len(cand.split()) >= 2 and sum(c.isalpha() for c in cand) >= 6:
-                    found.append({"title": cand, "page": n, "group": g, "level": 2})
+                if CAPS_RE.match(cand) and len(cand.split()) >= 2 and sum(c.isalpha() for c in cand) >= 6 and plausible_title(cand):
+                    found.append({"title": nice_case(cand), "page": n, "group": g, "level": 2})
                     break
 
     # Drop consecutive repeats (running headers) and titles that recur on many pages.
