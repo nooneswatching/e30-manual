@@ -33,7 +33,9 @@ from bmw_groups import MAIN_GROUPS, group_name  # noqa: E402
 DEFAULTS = {
     "lang": "eng",
     "psm": 3,
-    "ocr_dpi": 300,
+    "ocr_dpi": 300,       # render resolution for born-digital pages
+    "ocr_scale": 2.0,     # scanned pages are upscaled this much over their native pixel size for OCR
+    "ocr_max_width": 3400,
     "view_width": 1600,   # max pixel width of the page image shown in the browser
     "image_quality": 72,
     "osd": True,          # detect and fix rotated scans
@@ -155,6 +157,38 @@ def _text_layer(page) -> tuple[str, list]:
     return text, words
 
 
+def text_layer_quality(text: str) -> float:
+    """Share of tokens that look like real words/numbers. Garbage OCR layers score low."""
+    toks = text.split()
+    if not toks:
+        return 0.0
+    good = sum(1 for t in toks if re.fullmatch(r"[A-Za-z][a-z]+[.,;:)!?]?|\d+[.,]?\d*|[A-Z]{2,}", t))
+    return good / len(toks)
+
+
+def native_image_width(doc, page) -> int:
+    """Pixel width of the largest image on a scanned page (0 if none)."""
+    best = 0
+    try:
+        for info in page.get_images(full=True):
+            xref = info[0]
+            w = doc.extract_image(xref).get("width", 0) if xref else 0
+            best = max(best, w)
+    except Exception:
+        pass
+    return best
+
+
+def render(page, width_px: int):
+    """Render a page to a PIL image of the given pixel width."""
+    import pymupdf
+    from PIL import Image
+
+    zoom = width_px / max(page.rect.width, 1)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    return Image.open(io.BytesIO(pix.tobytes("png")))
+
+
 def process_page(job: dict) -> dict:
     """Render + OCR one page. Executed in a worker process."""
     import pymupdf
@@ -176,15 +210,20 @@ def process_page(job: dict) -> dict:
     rotation = 0
     source = "ocr"
 
+    native_w = native_image_width(doc, page)
+    dpi_width = int(page.rect.width / 72 * opts["ocr_dpi"])
+    if native_w:
+        ocr_width = int(min(opts["ocr_max_width"], max(native_w * opts["ocr_scale"], 1200)))
+    else:
+        ocr_width = min(opts["ocr_max_width"], dpi_width)
+
     existing_text = page.get_text("text").strip() if not opts["force_ocr"] else ""
-    if len(existing_text) >= 40:
+    if len(existing_text) >= 40 and text_layer_quality(existing_text) >= 0.5:
         text, words = _text_layer(page)
         source = "pdf-text"
-        pix = page.get_pixmap(dpi=min(opts["ocr_dpi"], 200), alpha=False)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        img = render(page, min(ocr_width, max(native_w or 0, dpi_width * 2 // 3)))
     else:
-        pix = page.get_pixmap(dpi=opts["ocr_dpi"], alpha=False)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        img = render(page, ocr_width)
         if opts["osd"]:
             rotation = _osd_rotation(img)
             if rotation:
@@ -198,9 +237,10 @@ def process_page(job: dict) -> dict:
     # Page image for the viewer (downscaled, WebP).
     img_file.parent.mkdir(parents=True, exist_ok=True)
     view = img.convert("RGB")
-    if view.width > opts["view_width"]:
-        scale = opts["view_width"] / view.width
-        view = view.resize((opts["view_width"], max(1, round(view.height * scale))), Image.LANCZOS)
+    target_w = min(opts["view_width"], max(native_w, 1000)) if native_w else opts["view_width"]
+    if view.width > target_w:
+        scale = target_w / view.width
+        view = view.resize((target_w, max(1, round(view.height * scale))), Image.LANCZOS)
     try:
         view.save(img_file, "WEBP", quality=opts["image_quality"], method=4)
     except Exception:
@@ -234,50 +274,119 @@ def clean_title(t: str) -> str:
     return t
 
 
+# Page header "11-37", "11- 26", "32-51a", "00-1 Maintenance and General" -> repair group + printed page
+PAGE_HEADER_RE = re.compile(r"^\s*(\d{2})\s?[-–—]\s?(\d{1,3})\s?([a-z])?\b\s*(.*)$")
+# Sub-section "11 21 ... Crankshaft and Bearings", "1112... Valve Seat Inserts", "11 33 Rocker arms"
+SUBSECTION_RE = re.compile(r"^\s*(\d{2})\s?(\d{2})\s*(\.{2,}|…)?\s+([A-Za-z(][^\n]{2,80})$")
+# Variant line above the heading: "ENGINE M 20 B25", "TRANSMISSION ZF 4HP22"
+VARIANT_RE = re.compile(r"^[A-Z][A-Z /]{3,24}\s+[A-Z]{1,3}\s?\d{1,3}[A-Z0-9 ]{0,12}$")
+
+
+def page_header(lines: list[str]) -> tuple[str | None, str | None]:
+    """Return (group, printed page label) from the running header of a page, if present."""
+    for ln in lines[:4]:
+        m = PAGE_HEADER_RE.match(ln)
+        if m and m.group(1) in MAIN_GROUPS:
+            return m.group(1), f"{m.group(1)}-{m.group(2)}{m.group(3) or ''}"
+    return None, None
+
+
 def detect_sections(pages: list[dict]) -> list[dict]:
-    """Heuristic headings from OCR text when the PDF has no outline."""
-    found: list[dict] = []
+    """Heuristic headings from OCR text when the PDF has no outline.
+
+    Level 1: BMW main group, from the "GG-NN" running page header (smoothed over neighbours).
+    Level 2: repair codes "GG SS NNN Title", sub-sections "GG SS ... Title", or an all-caps heading.
+    """
+    page_lines = {}
+    raw_groups = {}
     for rec in pages:
-        text = rec.get("text") or ""
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        lines = [ln.strip() for ln in (rec.get("text") or "").split("\n") if ln.strip()]
+        page_lines[rec["n"]] = lines
+        g, label = page_header(lines)
+        raw_groups[rec["n"]] = g
+        rec["label"] = label
+        rec["group"] = g
+    # Smooth: a group is trusted if a neighbouring page agrees (OCR misreads are isolated).
+    ns = [r["n"] for r in pages]
+    groups = {}
+    for i, n in enumerate(ns):
+        g = raw_groups[n]
+        prev_g = raw_groups[ns[i - 1]] if i else None
+        next_g = raw_groups[ns[i + 1]] if i + 1 < len(ns) else None
+        groups[n] = g if g and (g == prev_g or g == next_g or len(ns) < 3) else None
+    # Backfill: an isolated page just before a run of the same group belongs to it.
+    for i in range(len(ns) - 2, -1, -1):
+        n, nxt = ns[i], ns[i + 1]
+        if not groups[n] and raw_groups[n] and raw_groups[n] == groups[nxt]:
+            groups[n] = raw_groups[n]
+    for rec in pages:
+        if not groups[rec["n"]] and rec.get("group"):
+            rec["group"] = None
+
+    found: list[dict] = []
+    current_group = None
+    for rec in pages:
+        n = rec["n"]
+        lines = page_lines[n]
+        g = groups[n]
+        if g and g != current_group:
+            found.append({"title": f"{g} {group_name(g)}", "page": n, "group": g, "level": 1})
+            current_group = g
         if not lines:
             continue
-        got_code = False
-        for ln in lines:
+        variant = None
+        for ln in lines[:3]:
+            if VARIANT_RE.match(ln) and not PAGE_HEADER_RE.match(ln):
+                vm = re.match(r"^([A-Z][A-Z /]*?)\s+([A-Z]{1,3})\s?(\d{1,3})", ln)
+                variant = f"{vm.group(1).strip().title()} {vm.group(2)}{vm.group(3)}" if vm else re.sub(r"\s+", " ", ln).strip()
+                break
+        got = False
+        for ln in lines[:12]:
             m = REPAIR_CODE_RE.match(ln)
             if m:
-                g, s, n, title = m.groups()
+                gg, ss, nnn, title = m.groups()
                 title = clean_title(title)
-                if len(title) < 4 or sum(c.isalpha() for c in title) < 4:
+                if sum(c.isalpha() for c in title) < 4:
                     continue
-                found.append({"title": f"{g} {s} {n} {title}", "page": rec["n"], "group": g, "level": 2})
-                got_code = True
+                found.append({"title": f"{gg} {ss} {nnn} {title}", "page": n, "group": gg if gg in MAIN_GROUPS else g, "level": 2})
+                got = True
                 continue
+            m = SUBSECTION_RE.match(ln)
+            if m and not got:
+                gg, ss, dots, title = m.groups()
+                title = clean_title(title)
+                if (dots or gg == g) and gg in MAIN_GROUPS and sum(c.isalpha() for c in title) >= 4:
+                    t = f"{gg} {ss} {title}"
+                    if variant:
+                        t += f" ({variant})"
+                    found.append({"title": t, "page": n, "group": gg, "level": 2})
+                    got = True
+                    continue
             m = SECTION_RE.match(ln)
-            if m and not got_code:
+            if m and not got:
                 num, title = m.groups()
                 code = num.zfill(2)[:2]
-                found.append({"title": f"{num} {clean_title(title)}", "page": rec["n"],
-                              "group": code if code in MAIN_GROUPS else None, "level": 1})
-                got_code = True
-        if not got_code:
-            # Fall back to an all-caps heading among the first few lines of the page.
+                found.append({"title": f"{num} {clean_title(title)}", "page": n, "group": code if code in MAIN_GROUPS else g, "level": 2})
+                got = True
+        if not got:
             for ln in lines[:4]:
                 cand = clean_title(ln)
+                if PAGE_HEADER_RE.match(cand) or VARIANT_RE.match(cand):
+                    continue
                 if CAPS_RE.match(cand) and len(cand.split()) >= 2 and sum(c.isalpha() for c in cand) >= 6:
-                    found.append({"title": cand, "page": rec["n"], "group": None, "level": 2})
+                    found.append({"title": cand, "page": n, "group": g, "level": 2})
                     break
-    # De-duplicate consecutive identical headings (running headers).
+
+    # Drop consecutive repeats (running headers) and titles that recur on many pages.
     out: list[dict] = []
     for sec in found:
-        if out and out[-1]["title"].lower() == sec["title"].lower():
+        if out and out[-1]["title"].lower() == sec["title"].lower() and out[-1]["level"] == sec["level"]:
             continue
         out.append(sec)
-    # Running page headers that repeat on many pages are noise, drop titles seen > 6 times.
     counts: dict[str, int] = {}
     for sec in out:
         counts[sec["title"].lower()] = counts.get(sec["title"].lower(), 0) + 1
-    return [s for s in out if counts[s["title"].lower()] <= 6]
+    return [s for s in out if s["level"] == 1 or counts[s["title"].lower()] <= 6]
 
 
 def outline_sections(doc) -> list[dict]:
@@ -363,10 +472,15 @@ def build_manual(pdf: Path, args, out_root: Path, cache_root: Path) -> dict:
 
     pages = [results[n] for n in sorted(results)]
 
+    # Running-header labels ("11-37") and group per page.
+    for rec in pages:
+        lines = [ln.strip() for ln in (rec.get("text") or "").split("\n") if ln.strip()]
+        rec["group"], rec["label"] = page_header(lines)
+
     # Per-page JSON for the viewer (text + word boxes).
     for rec in pages:
         with open(page_dir / f"{rec['n']}.json", "w", encoding="utf-8") as f:
-            json.dump({k: rec[k] for k in ("n", "w", "h", "img", "text", "words", "source")}, f, ensure_ascii=False)
+            json.dump({k: rec.get(k) for k in ("n", "w", "h", "img", "text", "words", "source", "label", "group")}, f, ensure_ascii=False)
 
     # Table of contents: sidecar > PDF outline > heuristics.
     if sidecar.get("toc"):
@@ -415,6 +529,7 @@ def build_manual(pdf: Path, args, out_root: Path, cache_root: Path) -> dict:
         "page_offset": int(sidecar.get("page_offset", 0)),
         "toc": toc,
         "toc_source": toc_source,
+        "labels": {r["n"]: r["label"] for r in pages if r.get("label")},
         "groups": assign_groups(toc),
         "search": f"search/{manual_id}.json",
         "hash": digest,

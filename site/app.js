@@ -173,10 +173,10 @@
           ${join(groups, g => h`<div class="panel" id="g-${g.id}" style="margin-bottom:1rem">
               <h2 style="margin-top:0">${g.id === 'other' ? '' : g.id + ' · '}${g.name}
                 ${g.id !== 'other' ? raw(h` <a class="small" href="#/parts/g/${g.id}">parts diagrams ›</a>`) : ''}</h2>
-              <ul class="toc-list">${join(g.sections, s => h`<li class="l${s.level}"><a href="#/m/${m.id}/p/${s.page}">${s.title}</a><span class="pg">p. ${s.page}</span></li>`)}</ul>
+              <ul class="toc-list">${join(g.sections, s => h`<li class="l${s.level}"><a href="#/m/${m.id}/p/${s.page}">${s.title}</a><span class="pg">${m.labels && m.labels[s.page] ? m.labels[s.page] + ' · ' : ''}p. ${s.page}</span></li>`)}</ul>
             </div>`)}
           <div class="panel" id="pages"><h2 style="margin-top:0">All pages</h2>
-            <div class="pagegrid">${join(m.built_pages || [], p => h`<a href="#/m/${m.id}/p/${p}"><img loading="lazy" src="${DATA}manuals/${m.id}/img/${p}.webp" alt=""><div>${p}</div></a>`)}</div>
+            <div class="pagegrid">${join(m.built_pages || [], p => h`<a href="#/m/${m.id}/p/${p}"><img loading="lazy" src="${DATA}manuals/${m.id}/img/${p}.webp" alt=""><div>${p}${m.labels && m.labels[p] ? ' · ' + m.labels[p] : ''}</div></a>`)}</div>
           </div>
         </div>
       </div>`);
@@ -200,7 +200,8 @@
     const section = [...m.toc].reverse().find(s => s.page <= n);
     const showText = params.text !== '0';
     setTitle(`${m.title} p.${n}`);
-    const printed = m.page_offset ? ` (printed p. ${n - m.page_offset})` : '';
+    const label = (m.labels && m.labels[n]) || (page && page.label) || '';
+    const printed = label ? ` · printed ${label}` : (m.page_offset ? ` (printed p. ${n - m.page_offset})` : '');
     render(h`
       <div class="breadcrumb"><a href="#/">Manuals</a> › <a href="#/m/${m.id}">${m.title}</a>${section ? raw(h` › ${section.title}`) : ''}</div>
       <div class="viewer-bar">
@@ -298,7 +299,7 @@
       filtered.slice(0, 200).map(r => {
         const m = manualById(r.m);
         return h`<div class="result">
-          <a href="#/m/${r.m}/p/${r.p}?q=${encodeURIComponent(query)}"><strong>${m?.title || r.m}</strong> · page ${r.p}</a>
+          <a href="#/m/${r.m}/p/${r.p}?q=${encodeURIComponent(query)}"><strong>${m?.title || r.m}</strong> · page ${r.p}${m?.labels?.[r.p] ? ' (' + m.labels[r.p] + ')' : ''}</a>
           ${r.s ? raw(h`<div class="where">${r.s}</div>`) : ''}
           <p class="snip">${raw(snippet(r.t, terms))}</p></div>`;
       }).join('') + (filtered.length > 200 ? '<p class="muted">Showing the first 200 results.</p>' : '');
