@@ -1,0 +1,67 @@
+{
+ "id": "34_0210",
+ "title": "Front brake / Brake pads",
+ "group": "34",
+ "image": "34_0210.png",
+ "source": "sample",
+ "notes": "Sample diagram with placeholder part numbers.",
+ "callouts": [
+  {
+   "n": 1,
+   "x": 0.2857,
+   "y": 0.17
+  },
+  {
+   "n": 2,
+   "x": 0.6214,
+   "y": 0.25
+  },
+  {
+   "n": 3,
+   "x": 0.7929,
+   "y": 0.7
+  },
+  {
+   "n": 4,
+   "x": 0.9286,
+   "y": 0.3
+  }
+ ],
+ "items": [
+  {
+   "n": 1,
+   "part": "34 11 0 000 010",
+   "desc": "Brake disc, ventilated (placeholder)",
+   "qty": 2,
+   "notes": "placeholder"
+  },
+  {
+   "n": 2,
+   "part": "34 11 0 000 011",
+   "desc": "Brake caliper, left (placeholder)",
+   "qty": 1,
+   "notes": "placeholder"
+  },
+  {
+   "n": 3,
+   "part": "34 11 0 000 012",
+   "desc": "Set of brake pads, front (placeholder)",
+   "qty": 1,
+   "notes": "placeholder"
+  },
+  {
+   "n": 4,
+   "part": "34 11 0 000 013",
+   "desc": "Retaining spring (placeholder)",
+   "qty": 2,
+   "notes": "placeholder"
+  },
+  {
+   "n": 5,
+   "part": "11 42 0 000 003",
+   "desc": "Hex bolt M8x120 (placeholder)",
+   "qty": 2,
+   "notes": "shared with 11_0450 to demonstrate reverse lookup"
+  }
+ ]
+}

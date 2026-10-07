@@ -1,0 +1,24 @@
+{
+ "sample": true,
+ "vehicle": {
+  "name": "BMW 3 Series (E30)",
+  "years": "1982-1994",
+  "note": "SAMPLE DATA. The diagrams and part numbers below are placeholders to show how the catalogue works. Replace them with your own (see parts/README.md)."
+ },
+ "groups": [
+  {
+   "id": "11",
+   "name": "Engine",
+   "diagrams": [
+    "11_0450"
+   ]
+  },
+  {
+   "id": "34",
+   "name": "Brakes",
+   "diagrams": [
+    "34_0210"
+   ]
+  }
+ ]
+}
