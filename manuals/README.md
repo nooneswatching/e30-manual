@@ -19,7 +19,18 @@ python tools/serve.py                 # open http://localhost:8000
 
 Pushing the PDFs to GitHub triggers the same build in GitHub Actions and publishes the site to GitHub Pages.
 
-## Big files
+## Big files: attach them to a GitHub Release instead
+
+The easiest way to publish large scans is not to commit them at all:
+
+1. On GitHub open **Releases → Draft a new release**, type `manuals` as the tag, and drag the PDFs
+   into the attachments box (each file may be up to 2 GB; uploads run in the browser).
+2. Publish the release. The build workflow downloads every `*.pdf` (and sidecar `*.json`) attached
+   to that release into `manuals/` before building. Locally, `python tools/fetch_manuals.py` does the same.
+
+Replace or add files by editing the release. PDFs committed in `manuals/` still work too.
+
+## Big files in git
 
 GitHub refuses single files over 100 MB. Options, in order of convenience:
 

@@ -30,6 +30,20 @@ jobs:
         with:
           lfs: false   # pulled below only when the OCR cache misses
 
+      # PDFs attached to the GitHub Release tagged "manuals" are used alongside any in manuals/.
+      # Release assets can be up to 2 GB each and are uploaded through the browser, so this is
+      # the easiest way to publish big scans without committing them.
+      - name: Fetch manuals from the "manuals" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view manuals >/dev/null 2>&1; then
+            gh release download manuals --dir manuals --pattern '*.pdf' --pattern '*.json' --clobber
+            ls -la manuals
+          else
+            echo "No release tagged 'manuals'; using PDFs committed in manuals/ only."
+          fi
+
       - name: Restore OCR cache
         id: cache
         uses: actions/cache@v4
