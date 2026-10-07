@@ -3,7 +3,7 @@
  "vehicle": {
   "name": "BMW 3 Series (E30)",
   "years": "1982-1994",
-  "note": "SAMPLE DATA. The diagrams and part numbers below are placeholders to show how the catalogue works. Replace them with your own (see parts/README.md)."
+  "note": "The diagrams and part numbers shown are placeholders that demonstrate how the catalogue works. Replace them with your own (see parts/README.md)."
  },
  "groups": [
   {
