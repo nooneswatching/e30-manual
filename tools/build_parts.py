@@ -117,7 +117,6 @@ def main() -> int:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     index = {
-        "generated": time.strftime("%Y-%m-%d %H:%M"),
         "vehicle": catalog.get("vehicle", {}),
         "sample": bool(catalog.get("sample", False)),
         "groups": sorted(groups.values(), key=lambda g: g["id"]),

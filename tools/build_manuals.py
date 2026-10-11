@@ -773,7 +773,7 @@ def main() -> int:
         # Still write an empty index so the site loads.
         out_root.mkdir(parents=True, exist_ok=True)
         with open(out_root / "manuals.json", "w") as f:
-            json.dump({"generated": time.strftime("%Y-%m-%d %H:%M"), "manuals": []}, f)
+            json.dump({"manuals": []}, f)
         return 0
 
     if args.clean:
@@ -791,7 +791,7 @@ def main() -> int:
     manuals = [build_manual(pdf, args, out_root, cache_root) for pdf in pdfs]
     out_root.mkdir(parents=True, exist_ok=True)
     with open(out_root / "manuals.json", "w", encoding="utf-8") as f:
-        json.dump({"generated": time.strftime("%Y-%m-%d %H:%M"), "manuals": manuals}, f, ensure_ascii=False, indent=1)
+        json.dump({"manuals": manuals}, f, ensure_ascii=False, indent=1)
     print(f"\nWrote {out_root / 'manuals.json'} with {len(manuals)} manual(s).")
     return 0
 
