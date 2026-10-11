@@ -1,0 +1,39 @@
+{
+ "id": "haynes-3-5-series",
+ "title": "Haynes BMW 3 & 5 Series Service and Repair Manual",
+ "type": "workshop",
+ "description": "1981-1991 3 Series (316, 318i, 320i, 325i) and 5 Series. Clean text: procedures, specifications, torque settings and wiring diagrams.",
+ "group_map": {
+  "1": "00",
+  "2A": "11",
+  "2B": "11",
+  "3": "17",
+  "4": "13",
+  "5": "12",
+  "6": "13",
+  "7A": "23",
+  "7B": "24",
+  "8": "21",
+  "9": "34",
+  "10": "31",
+  "11": "41",
+  "12": "61"
+ },
+ "chapters": {
+  "1": "Routine maintenance and servicing",
+  "2A": "In-car engine repair procedures",
+  "2B": "General engine overhaul procedures",
+  "3": "Cooling, heating and air conditioning systems",
+  "4": "Fuel and exhaust systems",
+  "5": "Engine electrical systems",
+  "6": "Engine management and emission control systems",
+  "7A": "Manual gearbox",
+  "7B": "Automatic transmission",
+  "8": "Clutch and driveline",
+  "9": "Braking system",
+  "10": "Suspension and steering systems",
+  "11": "Bodywork and fittings",
+  "12": "Body electrical systems",
+  "REF": "Reference"
+ }
+}

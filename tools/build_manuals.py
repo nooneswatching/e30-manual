@@ -64,7 +64,7 @@ def nice_case(title: str) -> str:
 
 
 def plausible_title(title: str) -> bool:
-    if not title or not title[0].isalpha():
+    if not title or not (title[0].isalpha() or re.match(r"^\d{1,3}\s+[A-Za-z]", title)):
         return False
     letters = sum(c.isalpha() for c in title)
     if letters < 4 or letters / max(len(title), 1) < 0.55:
@@ -171,8 +171,12 @@ def _ocr_image(img, lang: str, psm: int) -> tuple[str, list]:
     return "\n".join(out).strip(), words
 
 
-def _text_layer(page) -> tuple[str, list]:
-    """Use an existing PDF text layer (born-digital PDF or previously OCR'd scan)."""
+def _text_layer(page) -> tuple[str, list, dict]:
+    """Use an existing PDF text layer (born-digital PDF or previously OCR'd scan).
+
+    Also returns font information for heading detection: lines that are larger or bolder
+    than the body text, with their position, and the body font size.
+    """
     rect = page.rect
     W, H = rect.width or 1, rect.height or 1
     words = []
@@ -181,7 +185,45 @@ def _text_layer(page) -> tuple[str, list]:
         if txt:
             words.append([txt, round(x0 / W, 4), round(y0 / H, 4), round(x1 / W, 4), round(y1 / H, 4)])
     text = page.get_text("text").strip()
-    return text, words
+
+    lines = []
+    body_sizes: list[float] = []
+    try:
+        for b in page.get_text("dict")["blocks"]:
+            if b.get("type") != 0:
+                continue
+            for ln in b["lines"]:
+                spans = [sp for sp in ln["spans"] if sp["text"].strip()]
+                if not spans:
+                    continue
+                main = max(spans, key=lambda sp: len(sp["text"].strip()))
+                size = main["size"]
+                # Section numbers set as a big separate glyph on the heading line ("Compression check  3")
+                # Section headings carry a big icon glyph (symbol font) on the same line.
+                icons = [sp for sp in spans if sp["size"] >= size * 1.8 and len(sp["text"].strip()) <= 2]
+                t = re.sub(r"\s+", " ", " ".join(sp["text"] for sp in spans if sp not in icons)).strip()
+                if not t:
+                    continue
+                bold = bool((main["flags"] & 16) or "bold" in main["font"].lower())
+                if len(t) > 30:
+                    body_sizes.append(size)
+                lines.append({"t": t, "size": round(size, 1), "bold": bold, "icon": bool(icons),
+                              "y": round(ln["bbox"][1]), "x": round(ln["bbox"][0])})
+    except Exception:
+        return text, words, {}
+    if not lines:
+        return text, words, {}
+    import statistics
+    body = statistics.median(body_sizes) if body_sizes else statistics.median(l["size"] for l in lines)
+    heads = [l for l in lines if (l["size"] >= body * 1.15 or (l["bold"] and l["size"] >= body * 1.1) or l["icon"])
+             and 3 <= len(l["t"]) <= 90 and sum(c.isalpha() for c in l["t"]) >= 3]
+    heads.sort(key=lambda l: (l["y"], l["x"]))
+    info = {"body": round(body, 1), "heads": heads[:40]}
+    for l in lines:  # bare running-header label such as "1•11"
+        if l["y"] < 60 and re.fullmatch(r"(\d{1,2}[A-Z]?|REF)[•·]\d{1,3}", l["t"]):
+            info["label"] = l["t"]
+            break
+    return text, words, info
 
 
 def text_layer_quality(text: str) -> float:
@@ -245,10 +287,11 @@ def process_page(job: dict) -> dict:
         ocr_width = min(opts["ocr_max_width"], dpi_width)
 
     existing_text = page.get_text("text").strip() if not opts["force_ocr"] else ""
+    fonts: dict = {}
     if len(existing_text) >= 40 and text_layer_quality(existing_text) >= 0.5:
-        text, words = _text_layer(page)
+        text, words, fonts = _text_layer(page)
         source = "pdf-text"
-        img = render(page, min(ocr_width, max(native_w or 0, dpi_width * 2 // 3)))
+        img = render(page, min(opts["ocr_max_width"], max(native_w or 0, dpi_width)))
     else:
         img = render(page, ocr_width)
         if opts["osd"]:
@@ -264,7 +307,10 @@ def process_page(job: dict) -> dict:
     # Page image for the viewer (downscaled, WebP).
     img_file.parent.mkdir(parents=True, exist_ok=True)
     view = img.convert("RGB")
-    target_w = min(opts["view_width"], max(native_w, 1000)) if native_w else opts["view_width"]
+    if source == "pdf-text" or not native_w:
+        target_w = opts["view_width"]
+    else:
+        target_w = min(opts["view_width"], max(native_w, 1000))
     if view.width > target_w:
         scale = target_w / view.width
         view = view.resize((target_w, max(1, round(view.height * scale))), Image.LANCZOS)
@@ -283,6 +329,7 @@ def process_page(job: dict) -> dict:
         "source": source,
         "text": text,
         "words": words,
+        "fonts": fonts,
     }
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_file, "w", encoding="utf-8") as f:
@@ -318,7 +365,119 @@ def page_header(lines: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
-def detect_sections(pages: list[dict]) -> list[dict]:
+# Haynes-style running header: "2B•4 General engine overhaul procedures" or "Title  2B•5"
+CHAPTER_HEADER_RE = re.compile(r"^(?:(\d{1,2}[A-Z]?|REF)[•·](\d{1,3})\s+(.+)|(.+?)\s+(\d{1,2}[A-Z]?|REF)[•·](\d{1,3}))$")
+
+
+def font_sections(pages: list[dict], group_map: dict | None, chapter_names: dict | None = None) -> list[dict]:
+    """Headings for pages with a real text layer, from font size and weight.
+
+    Level 1: chapter (from the running page header, when it changes).
+    Level 2: lines set much larger than body text (section titles).
+    Level 3: bold lines of two or more words (sub-headings), at most three per page.
+    """
+    group_map = group_map or {}
+    chapter_names = chapter_names or {}
+    found: list[dict] = []
+    current_chapter = None
+    for rec in pages:
+        fonts = rec.get("fonts") or {}
+        heads = fonts.get("heads") or []
+        body = fonts.get("body") or 8
+        if not heads:
+            continue
+        chapter = title = None
+        header_line = None
+        for h in heads:
+            m = CHAPTER_HEADER_RE.match(h["t"])
+            if m and h["y"] < 60:
+                chapter = m.group(1) or m.group(5)
+                pg = m.group(2) or m.group(6)
+                title = clean_title(m.group(3) or m.group(4))
+                rec["label"] = f"{chapter}•{pg}"
+                rec["group"] = group_map.get(chapter)
+                header_line = h
+                break
+        if not chapter and fonts.get("label"):
+            chapter = re.split(r"[•·]", fonts["label"])[0]
+            rec["label"] = fonts["label"]
+            rec["group"] = group_map.get(chapter)
+        if chapter:
+            title = chapter_names.get(chapter) or title
+        if chapter and chapter != current_chapter and title and title.lower() not in ("contents", "index"):
+            found.append({"title": f"Chapter {chapter} {title}" if chapter != "REF" else f"Reference: {title}",
+                          "page": rec["n"], "group": rec.get("group"), "level": 1})
+            current_chapter = chapter
+        # Section headings: a line with the icon glyph, plus its wrapped partner line (above or below).
+        consumed: set = set()
+        for i, h in enumerate(heads):
+            if not h.get("icon") or h is header_line:
+                continue
+            m = re.match(r"^(\d{1,2})\s+(.*)$", h["t"])
+            num, rest = (m.group(1), m.group(2)) if m else (None, h["t"])
+            partner = None
+            for j, o in enumerate(heads):
+                if j == i or j in consumed or o is header_line or o.get("icon") or not o["bold"]:
+                    continue
+                if abs(o["x"] - h["x"]) < 25 and abs(o["y"] - h["y"]) <= o["size"] * 1.7 and abs(o["size"] - h["size"]) < 1:
+                    partner = (j, o)
+                    break
+            if partner:
+                j, o = partner
+                pm = re.match(r"^(\d{1,2})\s+(.*)$", o["t"])
+                if pm and not num:
+                    num, o_text = pm.group(1), pm.group(2)
+                else:
+                    o_text = o["t"]
+                if rest[:1].islower() or o_text.endswith(("-", ",", "and", "/")):
+                    rest = f"{o_text} {rest}"
+                else:
+                    rest = f"{rest} {o_text}"
+                consumed.add(j)
+            consumed.add(i)
+            t = clean_title(rest)
+            if plausible_title(t):
+                found.append({"title": f"{num} {t}" if num else t, "page": rec["n"], "group": rec.get("group"), "level": 2})
+        # Join wrapped headings: consecutive candidates of the same style within ~1.6 line heights.
+        merged: list[dict] = []
+        for i, h in enumerate(heads):
+            if h is header_line or i in consumed:
+                continue
+            joined = False
+            for prev in merged[-6:]:  # same column, one line below, same style -> wrapped heading
+                if h["size"] == prev["size"] and h["bold"] == prev["bold"] and abs(h["x"] - prev["x"]) < 20 \
+                        and -3 <= h["y"] - prev["y"] <= h["size"] * 1.7 \
+                        and (h["t"][:1].islower() or prev["t"].endswith((",", "and", "-", "/"))):
+                    prev["t"] = f"{prev['t']} {h['t']}"
+                    prev["y"] = h["y"]
+                    joined = True
+                    break
+            if not joined:
+                merged.append(dict(h))
+        subs = 0
+        for h in merged:
+            t = clean_title(h["t"])
+            if not plausible_title(t) or CHAPTER_HEADER_RE.match(t):
+                continue
+            if h["size"] >= body * 1.5:
+                found.append({"title": t, "page": rec["n"], "group": rec.get("group"), "level": 2})
+            elif h["bold"] and h["size"] >= body * 1.1 and len(t.split()) >= 2 and not t.endswith(".") and subs < 3:
+                found.append({"title": t, "page": rec["n"], "group": rec.get("group"), "level": 3})
+                subs += 1
+    out: list[dict] = []
+    for sec in found:
+        if out and out[-1]["title"].lower() == sec["title"].lower():
+            continue
+        out.append(sec)
+    counts: dict[str, int] = {}
+    for sec in out:
+        counts[sec["title"].lower()] = counts.get(sec["title"].lower(), 0) + 1
+    return [s for s in out if s["level"] == 1 or counts[s["title"].lower()] <= 4]
+
+
+def detect_sections(pages: list[dict], group_map: dict | None = None, chapter_names: dict | None = None) -> list[dict]:
+    if sum(1 for r in pages if (r.get("fonts") or {}).get("heads")) >= len(pages) * 0.5:
+        return font_sections(pages, group_map, chapter_names)
     """Heuristic headings from OCR text when the PDF has no outline.
 
     Level 1: BMW main group, from the "GG-NN" running page header (smoothed over neighbours).
@@ -537,8 +696,17 @@ def build_manual(pdf: Path, args, out_root: Path, cache_root: Path) -> dict:
     elif outline:
         toc, toc_source = outline, "pdf-outline"
     else:
-        toc, toc_source = detect_sections(pages), "heuristic"
+        toc, toc_source = detect_sections(pages, sidecar.get("group_map"), sidecar.get("chapters")), "heuristic"
     toc.sort(key=lambda s: (s["page"], s["level"]))
+    for rec in pages:  # heading detection may have set labels/groups from running headers
+        if rec.get("label") or rec.get("group"):
+            pj = page_dir / f"{rec['n']}.json"
+            with open(pj, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("label") != rec.get("label") or data.get("group") != rec.get("group"):
+                data["label"], data["group"] = rec.get("label"), rec.get("group")
+                with open(pj, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
 
     # Search corpus: one document per page, tagged with the section in effect.
     search_dir = out_root / "search"
@@ -619,6 +787,7 @@ def main() -> int:
         print(f"ERROR: tesseract is not available ({e}). Install it: apt install tesseract-ocr  /  brew install tesseract")
         return 1
 
+    pdfs = [p for p in pdfs if not load_sidecar(p).get("skip")]
     manuals = [build_manual(pdf, args, out_root, cache_root) for pdf in pdfs]
     out_root.mkdir(parents=True, exist_ok=True)
     with open(out_root / "manuals.json", "w", encoding="utf-8") as f:
